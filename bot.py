@@ -1,8 +1,7 @@
 import os
-import re
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -18,65 +17,34 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.getenv("PORT", 8080))
 CONFIG_FILE = "bot_config.json"
 
-# Full model list provided
 ALL_MODELS = [
-    "gemini-2.5-flash-preview-tts",
-    "gemini-2.5-pro-preview-tts",
-    "gemma-4-26b-a4b-it",
-    "gemma-4-31b-it",
-    "gemini-flash-latest",
-    "gemini-flash-lite-latest",
-    "gemini-pro-latest",
-    "gemini-2.5-flash-image",
-    "gemini-3-flash-preview",
-    "gemini-3.1-pro-preview",
-    "gemini-3.1-pro-preview-customtools",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-flash-lite",
-    "gemini-3-pro-image-preview",
-    "gemini-3-pro-image",
-    "nano-banana-pro-preview",
-    "gemini-3.1-flash-image-preview",
-    "gemini-3.1-flash-image",
-    "gemini-3.1-flash-lite-image",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-omni-flash-preview",
-    "gemini-omni-1.1-flash",
-    "gemini-3.5-transcribe",
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-3.8-flash",
-    "lyria-3-clip-preview",
-    "lyria-3-pro-preview",
-    "lyria-3.5",
-    "gemini-3.1-flash-tts-preview",
-    "gemini-robotics-er-2-preview",
-    "gemini-2.5-computer-use-preview-10-2025",
-    "antigravity-preview-05-2026",
-    "deep-research-max-preview-04-2026",
-    "deep-research-preview-04-2026",
-    "deep-research-pro-preview-12-2025",
-    "gemini-embedding-001",
-    "gemini-embedding-2-preview",
-    "gemini-embedding-2",
-    "gemini-3.5-transcribe-live",
-    "gemini-2.5-flash-native-audio-latest",
-    "gemini-2.5-flash-native-audio-preview-09-2025",
-    "gemini-2.5-flash-native-audio-preview-12-2025",
-    "gemini-3.1-flash-live-preview",
-    "gemini-robotics-er-2-streaming-preview",
+    "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts", "gemma-4-26b-a4b-it",
+    "gemma-4-31b-it", "gemini-flash-latest", "gemini-flash-lite-latest",
+    "gemini-pro-latest", "gemini-2.5-flash-image", "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools",
+    "gemini-3.1-flash-lite-preview", "gemini-3.1-flash-lite", "gemini-3-pro-image-preview",
+    "gemini-3-pro-image", "nano-banana-pro-preview", "gemini-3.1-flash-image-preview",
+    "gemini-3.1-flash-image", "gemini-3.1-flash-lite-image", "gemini-3.5-flash",
+    "gemini-3.5-flash-lite", "gemini-omni-flash-preview", "gemini-omni-1.1-flash",
+    "gemini-3.5-transcribe", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
+    "lyria-3-clip-preview", "lyria-3-pro-preview", "lyria-3.5",
+    "gemini-3.1-flash-tts-preview", "gemini-robotics-er-2-preview",
+    "gemini-2.5-computer-use-preview-10-2025", "antigravity-preview-05-2026",
+    "deep-research-max-preview-04-2026", "deep-research-preview-04-2026",
+    "deep-research-pro-preview-12-2025", "gemini-embedding-001", "gemini-embedding-2-preview",
+    "gemini-embedding-2", "gemini-3.5-transcribe-live", "gemini-2.5-flash-native-audio-latest",
+    "gemini-2.5-flash-native-audio-preview-09-2025", "gemini-2.5-flash-native-audio-preview-12-2025",
+    "gemini-3.1-flash-live-preview", "gemini-robotics-er-2-streaming-preview",
     "gemini-3.5-live-translate-preview"
 ]
 
-# Initialize Gemini Client
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ----------------- CONFIG & PERSISTENT STORAGE -----------------
+# ----------------- CONFIG & STORAGE -----------------
 
 config = {
     "current_model": "gemini-3.6-flash",
@@ -84,17 +52,19 @@ config = {
     "log_channel_id": None,
     "summary_channel_id": None,
     "status_message_id": None,
-    # Summary buffer stores actual message objects; chars are calculated dynamically
-    "summary_messages": []  # [{"id": id, "url": url, "timestamp": str, "author": str, "content": str, "length": int}]
+    # Checkpoint tracking
+    "checkpoint": None, # {"id": int, "url": str, "timestamp": str}
+    "summary_messages": [] # list of {"id": int, "url": str, "author": str, "content": str, "length": int}
 }
+
+dashboard_lock = asyncio.Lock()
 
 def load_config():
     global config
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-                config.update(saved)
+                config.update(json.load(f))
         except Exception as e:
             print(f"Error loading config: {e}")
 
@@ -108,12 +78,10 @@ def save_config():
 load_config()
 
 def get_buffer_total_chars() -> int:
-    """Calculates total character count from stored message IDs."""
     return sum(m.get("length", len(m.get("content", ""))) for m in config["summary_messages"])
 
 # ----------------- REACTION EMOJIS -----------------
 
-EMOJI_YAWN = "🥱"
 EMOJI_CHECK = "✅"
 EMOJI_HOURGLASS = "⏳"
 EMOJI_ERROR = "❌"
@@ -130,10 +98,7 @@ async def safe_add_reaction(message: discord.Message, emoji_str: str):
     except Exception:
         pass
 
-# ----------------- PERMISSION CHECK -----------------
-
 async def is_authorized_owner(interaction: discord.Interaction) -> bool:
-    """Only the bot application owner or guild owner can modify settings."""
     app_info = await bot.application_info()
     if interaction.user.id == app_info.owner.id:
         return True
@@ -144,27 +109,66 @@ async def is_authorized_owner(interaction: discord.Interaction) -> bool:
 # ----------------- STATUS EMBED BUILDER -----------------
 
 def create_status_embed() -> discord.Embed:
-    chat_ch_mentions = ", ".join([f"<#{cid}>" for cid in config["chat_channels"]]) or "None"
+    chat_ch = ", ".join([f"<#{cid}>" for cid in config["chat_channels"]]) or "None"
     log_ch = f"<#{config['log_channel_id']}>" if config["log_channel_id"] else "None"
     sum_ch = f"<#{config['summary_channel_id']}>" if config["summary_channel_id"] else "None"
     total_chars = get_buffer_total_chars()
     msg_count = len(config["summary_messages"])
 
+    # Checkpoint representation
+    if config.get("checkpoint"):
+        cp = config["checkpoint"]
+        cp_val = f"📌 [Jump to Message]({cp['url']}) `(ID: {cp['id']})`"
+    else:
+        cp_val = "None (Waiting for next message)"
+
     embed = discord.Embed(title="⚙️ Gemini Bot Status Board", color=discord.Color.blue())
     embed.add_field(name="Current Model", value=f"`{config['current_model']}`", inline=False)
-    embed.add_field(name="Chat Channels", value=chat_ch_mentions, inline=False)
+    embed.add_field(name="Current Checkpoint", value=cp_val, inline=False)
+    embed.add_field(name="Chat Channels", value=chat_ch, inline=False)
     embed.add_field(name="Log Channel", value=log_ch, inline=True)
     embed.add_field(name="Summary Channel", value=sum_ch, inline=True)
     embed.add_field(
         name="Summary Buffer",
-        value=f"**{total_chars:,} / 10,000 chars** ({msg_count} message IDs stored)",
+        value=f"**{total_chars:,} / 10,000 chars** ({msg_count} messages recorded)",
         inline=False
     )
-    embed.set_footer(text=f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    # Using timezone-aware UTC datetime
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    embed.set_footer(text=f"Last updated: {now_utc}")
     return embed
 
+async def update_persistent_dashboard():
+    """Deletes previous status message and sends a new one at the very bottom of the log channel."""
+    async with dashboard_lock:
+        if not config["log_channel_id"]:
+            return
+
+        channel = bot.get_channel(config["log_channel_id"])
+        if not channel:
+            return
+
+        embed = create_status_embed()
+        view = InteractiveStatusView()
+
+        # Delete previous status message so the dashboard is always at the bottom
+        if config.get("status_message_id"):
+            try:
+                old_msg = await channel.fetch_message(config["status_message_id"])
+                await old_msg.delete()
+            except Exception:
+                pass
+
+        try:
+            new_msg = await channel.send(embed=embed, view=view)
+            config["status_message_id"] = new_msg.id
+            save_config()
+        except Exception as e:
+            print(f"Failed to post bottom dashboard: {e}")
+
 async def send_log(message: str, error: bool = False):
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    """Sends log text and ensures the status board stays at the bottom."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     prefix = "[ERROR]" if error else "[INFO]"
     formatted = f"`{timestamp}` **{prefix}** {message}"
     print(f"[{timestamp}] {prefix} {message}")
@@ -177,39 +181,13 @@ async def send_log(message: str, error: bool = False):
             except Exception as e:
                 print(f"Failed to post to log channel: {e}")
 
-async def update_persistent_dashboard():
-    """Updates the interactive board in the log channel."""
-    if not config["log_channel_id"]:
-        return
-
-    channel = bot.get_channel(config["log_channel_id"])
-    if not channel:
-        return
-
-    embed = create_status_embed()
-    view = InteractiveStatusView()
-
-    if config.get("status_message_id"):
-        try:
-            msg = await channel.fetch_message(config["status_message_id"])
-            await msg.edit(embed=embed, view=view)
-            return
-        except Exception:
-            pass  # Message was deleted or unreachable; post a new one
-
-    try:
-        new_msg = await channel.send(embed=embed, view=view)
-        config["status_message_id"] = new_msg.id
-        save_config()
-    except Exception as e:
-        print(f"Failed to post dashboard: {e}")
+    # Keep dashboard below the newly posted log message
+    await update_persistent_dashboard()
 
 # ----------------- INTERACTIVE DASHBOARD VIEW -----------------
 
 class QuickModelSelect(discord.ui.Select):
-    """Dropdown for changing the model directly from the board."""
     def __init__(self):
-        # Pick 20 top common models for the quick menu (Discord allows max 25 options)
         quick_options = [
             "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.5-flash",
             "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite",
@@ -237,10 +215,8 @@ class QuickModelSelect(discord.ui.Select):
 
         await interaction.response.defer()
         await send_log(f"🔔 **Model Changed:** `{selected}` by {interaction.user.mention}")
-        await update_persistent_dashboard()
 
 class ChannelPickerSelect(discord.ui.ChannelSelect):
-    """Channel picker for configuring Bot channels."""
     def __init__(self, target_type: str, placeholder: str, row: int):
         self.target_type = target_type
         super().__init__(
@@ -268,6 +244,7 @@ class ChannelPickerSelect(discord.ui.ChannelSelect):
             msg = f"Chat channel {selected_channel.mention} {action} allowed list."
         elif self.target_type == "log":
             config["log_channel_id"] = cid
+            config["status_message_id"] = None
             msg = f"System log channel set to {selected_channel.mention}."
         elif self.target_type == "summary":
             config["summary_channel_id"] = cid
@@ -276,7 +253,6 @@ class ChannelPickerSelect(discord.ui.ChannelSelect):
         save_config()
         await interaction.response.defer()
         await send_log(f"⚙️ **Channel Setting Changed:** {msg} (by {interaction.user.mention})")
-        await update_persistent_dashboard()
 
 class InteractiveStatusView(discord.ui.View):
     def __init__(self):
@@ -294,7 +270,6 @@ class InteractiveStatusView(discord.ui.View):
 # ----------------- SLASH COMMANDS -----------------
 
 async def model_autocomplete(interaction: discord.Interaction, current: str):
-    """Autocomplete for all 47 models as the user types."""
     return [
         app_commands.Choice(name=m, value=m)
         for m in ALL_MODELS if current.lower() in m.lower()
@@ -315,7 +290,6 @@ async def set_model(interaction: discord.Interaction, model: str):
 
     await interaction.response.send_message(f"✅ Active model switched to `{model}`.", ephemeral=True)
     await send_log(f"🔔 **Model Changed:** `{model}` by {interaction.user.mention}")
-    await update_persistent_dashboard()
 
 @bot.tree.command(name="set_chat_channel", description="Toggle or set an allowed channel for Gemini chat.")
 @app_commands.describe(channel="Select the text channel")
@@ -333,7 +307,6 @@ async def set_chat_channel(interaction: discord.Interaction, channel: discord.Te
 
     await interaction.response.send_message(f"Channel {channel.mention} {action} allowed list.", ephemeral=True)
     await send_log(f"Chat channel updated: {channel.name} ({channel.id}) {action} list by {interaction.user.mention}.")
-    await update_persistent_dashboard()
 
 @bot.tree.command(name="set_log_channel", description="Set the channel where system and error logs are sent.")
 @app_commands.describe(channel="Select the log channel")
@@ -347,7 +320,6 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
 
     await interaction.response.send_message(f"Log channel set to {channel.mention}.", ephemeral=True)
     await send_log(f"System log channel changed to {channel.name} ({channel.id}) by {interaction.user.mention}.")
-    await update_persistent_dashboard()
 
 @bot.tree.command(name="set_summary_channel", description="Set the channel where automated summaries are posted.")
 @app_commands.describe(channel="Select the summary channel")
@@ -360,15 +332,42 @@ async def set_summary_channel(interaction: discord.Interaction, channel: discord
 
     await interaction.response.send_message(f"Summary channel set to {channel.mention}.", ephemeral=True)
     await send_log(f"Summary channel changed to {channel.name} ({channel.id}) by {interaction.user.mention}.")
-    await update_persistent_dashboard()
 
 @bot.tree.command(name="bot_status", description="Check current status (Read-only view).")
 async def bot_status(interaction: discord.Interaction):
     embed = create_status_embed()
-    # Read-only slash command display (no buttons/select menus)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ----------------- AUTOMATED SUMMARIZATION -----------------
+@bot.tree.command(name="set_checkpoint", description="Reset the character counter and start a new checkpoint.")
+async def set_checkpoint(interaction: discord.Interaction):
+    """Resets counter; the next message received becomes the starting checkpoint."""
+    if not await is_authorized_owner(interaction):
+        return await interaction.response.send_message("❌ Only the bot owner can reset the checkpoint.", ephemeral=True)
+
+    config["summary_messages"] = []
+    config["checkpoint"] = None
+    save_config()
+
+    await interaction.response.send_message("✅ Checkpoint reset. The next incoming message will establish the new checkpoint.", ephemeral=True)
+    await send_log(f"🔄 Checkpoint reset manually by {interaction.user.mention}.")
+
+@bot.tree.command(name="summarize_now", description="Force summarize from the current checkpoint to the latest message.")
+async def summarize_now(interaction: discord.Interaction):
+    """Summarizes immediately from checkpoint to latest message."""
+    if not await is_authorized_owner(interaction):
+        return await interaction.response.send_message("❌ Only the bot owner can run this command.", ephemeral=True)
+
+    if not config["summary_messages"]:
+        return await interaction.response.send_message("⚠️ The summary buffer is currently empty. Nothing to summarize.", ephemeral=True)
+
+    if not config["summary_channel_id"]:
+        return await interaction.response.send_message("⚠️ Please set a summary channel first using `/set_summary_channel`.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+    asyncio.create_task(process_summary_buffer())
+    await interaction.followup.send("✅ Summary generation triggered.")
+
+# ----------------- SUMMARIZATION PROCESSING -----------------
 
 async def process_summary_buffer():
     if not config["summary_channel_id"] or not config["summary_messages"]:
@@ -379,15 +378,18 @@ async def process_summary_buffer():
         return
 
     messages_to_summarize = list(config["summary_messages"])
-    config["summary_messages"] = []
-    save_config()
-    await update_persistent_dashboard()
+    checkpoint_data = config.get("checkpoint")
 
-    first_msg = messages_to_summarize[0]
+    # Reset buffer and checkpoint
+    config["summary_messages"] = []
+    config["checkpoint"] = None
+    save_config()
+
+    first_msg = checkpoint_data if checkpoint_data else messages_to_summarize[0]
     last_msg = messages_to_summarize[-1]
 
-    start_time = first_msg["timestamp"][:16].replace("T", " ")
-    end_time = last_msg["timestamp"][:16].replace("T", " ")
+    start_time = first_msg.get("timestamp", "")[:16].replace("T", " ")
+    end_time = last_msg.get("timestamp", "")[:16].replace("T", " ")
 
     header = f"🔗 [Start]({first_msg['url']}) ({start_time}) ➔ [End]({last_msg['url']}) ({end_time})\n"
     max_summary_length = 500 - len(header) - 10
@@ -420,7 +422,7 @@ async def process_summary_buffer():
     except Exception as e:
         await send_log(f"Summarization error: {e}", error=True)
 
-# ----------------- MESSAGE HANDLING & PING CHECK -----------------
+# ----------------- MESSAGE HANDLING -----------------
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -429,50 +431,49 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
-    # 1. STRICT CHECK: Bot ONLY responds if directly mentioned with @
-    if message.mention_everyone:
-        return
-    if bot.user not in message.mentions:
+    # STRICT: Bot only responds if directly @pinged
+    if message.mention_everyone or bot.user not in message.mentions:
         return
 
     is_thread = isinstance(message.channel, discord.Thread)
     is_allowed_chat = message.channel.id in config["chat_channels"]
     thread_parent_allowed = is_thread and (message.channel.parent_id in config["chat_channels"])
 
-    # If chat channels are specified, ensure the mention occurs in an allowed channel/thread
     if config["chat_channels"] and not (is_allowed_chat or thread_parent_allowed):
         return
 
-    # 2. Record message ID and content into summary buffer
+    # Checkpoint recording: set checkpoint if buffer was empty
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if not config["summary_messages"]:
+        config["checkpoint"] = {
+            "id": message.id,
+            "url": message.jump_url,
+            "timestamp": now_iso
+        }
+
     config["summary_messages"].append({
         "id": message.id,
         "url": message.jump_url,
-        "timestamp": message.created_at.isoformat(),
+        "timestamp": now_iso,
         "author": message.author.display_name,
         "content": message.clean_content,
         "length": len(message.clean_content)
     })
     save_config()
 
-    total_chars = get_buffer_total_chars()
-    # Trigger auto-summary at 10,000 +- 500 chars (9,500 threshold)
-    if total_chars >= 9500:
+    # Trigger automatic summary if 10,000 +- 500 chars (>= 9,500 threshold)
+    if get_buffer_total_chars() >= 9500:
         asyncio.create_task(process_summary_buffer())
 
-    # Update dashboard character count in background
+    # Update dashboard in log channel
     asyncio.create_task(update_persistent_dashboard())
 
-    # 3. REACTION LIFECYCLE
-    await safe_add_reaction(message, EMOJI_YAWN)
-    await asyncio.sleep(0.2)
-    await safe_remove_reaction(message, EMOJI_YAWN)
+    # --- REACTION LIFECYCLE (Yawning face removed) ---
     await safe_add_reaction(message, EMOJI_CHECK)
     await safe_add_reaction(message, EMOJI_HOURGLASS)
 
     try:
-        # Context gathering
         if is_thread:
-            # Deep thread context
             thread_history = []
             async for h_msg in message.channel.history(limit=60, oldest_first=True):
                 role = "model" if h_msg.author == bot.user else "user"
@@ -480,10 +481,8 @@ async def on_message(message: discord.Message):
                 if clean_text:
                     thread_history.append(f"{h_msg.author.display_name} ({role}): {clean_text}")
 
-            context_block = "\n".join(thread_history)
-            contents = f"Thread conversation history:\n{context_block}\n\nRespond to the latest query."
+            contents = f"Thread conversation history:\n" + "\n".join(thread_history) + "\n\nPlease respond to the latest query."
         else:
-            # Channel context (last 10 messages)
             recent_msgs = []
             async for h_msg in message.channel.history(limit=10, oldest_first=True):
                 role = "model" if h_msg.author == bot.user else "user"
@@ -491,10 +490,8 @@ async def on_message(message: discord.Message):
                 if clean_text:
                     recent_msgs.append(f"{h_msg.author.display_name}: {clean_text}")
 
-            context_block = "\n".join(recent_msgs)
-            contents = f"Recent context:\n{context_block}\n\nRespond to {message.author.display_name}."
+            contents = f"Recent context:\n" + "\n".join(recent_msgs) + f"\n\nRespond to {message.author.display_name}."
 
-        # Call active Gemini model
         response = await asyncio.to_thread(
             gemini_client.models.generate_content,
             model=config["current_model"],
@@ -506,7 +503,7 @@ async def on_message(message: discord.Message):
         await safe_remove_reaction(message, EMOJI_CHECK)
         await safe_remove_reaction(message, EMOJI_HOURGLASS)
 
-        # Discord 2000-char message chunking
+        # Discord 2,000-char message chunking
         if len(reply_text) <= 2000:
             await message.reply(reply_text, mention_author=False)
         else:
@@ -535,7 +532,7 @@ async def on_message(message: discord.Message):
         await message.reply(f"⚠️ **Unexpected Error:** {err_msg}", mention_author=False)
         await send_log(f"Exception: {err_msg}", error=True)
 
-# ----------------- RENDER HEALTH SERVER -----------------
+# ----------------- HEALTH SERVER -----------------
 
 async def start_health_server():
     async def ping(request):
@@ -563,7 +560,6 @@ async def on_ready():
         print(f"Command sync error: {e}")
 
     await send_log(f"Bot awakened and online using model `{config['current_model']}`.")
-    await update_persistent_dashboard()
 
 async def main():
     async with bot:
