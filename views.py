@@ -1,9 +1,9 @@
 import discord
 from datetime import datetime, timezone
-from config import config, save_config, ALL_MODELS, get_buffer_total_chars
+from config import config, save_config, ALL_MODELS, get_buffer_total_chars, generate_config_text
 
 def create_status_embed() -> discord.Embed:
-    chat_ch = ", ".join([f"<#{cid}>" for cid in config["chat_channels"]]) or "None"
+    chat_ch = f"<#{config['chat_channel_id']}>" if config["chat_channel_id"] else "None (Auto-binds on first use)"
     log_ch = f"<#{config['log_channel_id']}>" if config["log_channel_id"] else "None"
     sum_ch = f"<#{config['summary_channel_id']}>" if config["summary_channel_id"] else "None"
     total_chars = get_buffer_total_chars()
@@ -13,12 +13,12 @@ def create_status_embed() -> discord.Embed:
         cp = config["checkpoint"]
         cp_val = f"📌 [Jump to Checkpoint]({cp['url']}) `(ID: {cp['id']})`"
     else:
-        cp_val = "None (Awaiting next message to mark start)"
+        cp_val = "None (Awaiting message to establish checkpoint)"
 
     embed = discord.Embed(title="⚙️ Gemini Bot Status Board", color=discord.Color.blue())
     embed.add_field(name="Current Model", value=f"`{config['current_model']}`", inline=False)
     embed.add_field(name="Current Checkpoint", value=cp_val, inline=False)
-    embed.add_field(name="Chat Channels", value=chat_ch, inline=False)
+    embed.add_field(name="Chat Channel (Exclusive)", value=chat_ch, inline=False)
     embed.add_field(name="Log Channel", value=log_ch, inline=True)
     embed.add_field(name="Summary Channel", value=sum_ch, inline=True)
     embed.add_field(
@@ -31,12 +31,15 @@ def create_status_embed() -> discord.Embed:
     return embed
 
 async def is_owner(bot, interaction: discord.Interaction) -> bool:
-    app_info = await bot.application_info()
-    if interaction.user.id == app_info.owner.id:
+    """Robust owner check: Administrator permissions, guild owner, or bot application owner."""
+    if interaction.user.guild_permissions.administrator:
         return True
     if interaction.guild and interaction.user.id == interaction.guild.owner_id:
         return True
-    return False
+    try:
+        return await bot.is_owner(interaction.user)
+    except Exception:
+        return False
 
 class QuickModelSelect(discord.ui.Select):
     def __init__(self, bot, on_change_callback):
@@ -55,7 +58,7 @@ class QuickModelSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         if not await is_owner(self.bot, interaction):
-            return await interaction.response.send_message("❌ Only the owner can change this.", ephemeral=True)
+            return await interaction.response.send_message("❌ Only administrators or bot owners can change this.", ephemeral=True)
         config["current_model"] = self.values[0]
         save_config()
         await interaction.response.defer()
@@ -70,17 +73,14 @@ class ChannelPickerSelect(discord.ui.ChannelSelect):
 
     async def callback(self, interaction: discord.Interaction):
         if not await is_owner(self.bot, interaction):
-            return await interaction.response.send_message("❌ Only the owner can change this.", ephemeral=True)
+            return await interaction.response.send_message("❌ Only administrators or bot owners can change channels.", ephemeral=True)
+
         channel = self.values[0]
         cid = channel.id
 
         if self.target_type == "chat":
-            if cid in config["chat_channels"]:
-                config["chat_channels"].remove(cid)
-                msg = f"Chat channel {channel.mention} removed from allowed list."
-            else:
-                config["chat_channels"].append(cid)
-                msg = f"Chat channel {channel.mention} added to allowed list."
+            config["chat_channel_id"] = cid
+            msg = f"Chat channel set exclusively to {channel.mention}."
         elif self.target_type == "log":
             config["log_channel_id"] = cid
             config["status_message_id"] = None
@@ -98,7 +98,7 @@ class InteractiveStatusView(discord.ui.View):
         super().__init__(timeout=None)
         self.refresh_callback = refresh_callback
         self.add_item(QuickModelSelect(bot, on_change_callback))
-        self.add_item(ChannelPickerSelect(bot, "chat", "Toggle Chat Channel...", 1, on_change_callback))
+        self.add_item(ChannelPickerSelect(bot, "chat", "Set Exclusive Chat Channel...", 1, on_change_callback))
         self.add_item(ChannelPickerSelect(bot, "log", "Set Log Channel...", 2, on_change_callback))
         self.add_item(ChannelPickerSelect(bot, "summary", "Set Summary Channel...", 3, on_change_callback))
 
